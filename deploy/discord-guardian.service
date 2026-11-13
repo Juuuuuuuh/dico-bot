@@ -1,0 +1,29 @@
+[Unit]
+Description=Discord Guardian moderation bot
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=discord-guardian
+Group=discord-guardian
+WorkingDirectory=/opt/discord-guardian
+EnvironmentFile=/opt/discord-guardian/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/discord-guardian/.venv/bin/python -m guardian.bot
+Restart=always
+RestartSec=15
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/discord-guardian/data
+RestrictSUIDSGID=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
