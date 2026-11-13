@@ -1,0 +1,18 @@
+{
+  "guild_id": 0,
+  "log_channel_id": 0,
+  "timeout_hours": 24,
+  "dry_run": true,
+  "blocked_domains": [],
+  "allowed_domains": [],
+  "blocked_image_sha256": [],
+  "blocked_bot_ids": [],
+  "kick_blocked_bots": false,
+  "trusted_bot_ids": [],
+  "exempt_role_ids": [],
+  "window_seconds": 10,
+  "message_limit": 6,
+  "repeat_limit": 3,
+  "mention_limit": 8,
+  "retention_days": 30
+}
