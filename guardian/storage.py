@@ -5,6 +5,7 @@ from pathlib import Path
 
 class Store:
     def __init__(self, path):
+        self.path = Path(path)
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row

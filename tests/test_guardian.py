@@ -9,6 +9,8 @@ import discord
 from guardian.bot import Guardian, install_commands, load_config
 from guardian.detection import Detector, blocked_domains
 from guardian.storage import Store
+from guardian.images import ImageResult
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -131,9 +133,28 @@ class ModerationTests(unittest.IsolatedAsyncioTestCase):
         await self.bot.inspect_message(self.message)
         self.author.timeout.assert_not_awaited()
 
+    async def test_suspicious_promotion_only_requests_human_review(self):
+        self.bot.config['dry_run'] = False
+        self.message.content = 'https://example.com free nitro connect your wallet act now'
+        await self.bot.inspect_message(self.message)
+        self.message.delete.assert_not_awaited()
+        self.author.timeout.assert_not_awaited()
+        self.assertIn('검토 알림만', self.store.recent(1)[0]['action'])
+
+    async def test_image_extracted_link_reaches_live_enforcement(self):
+        self.bot.config['dry_run'] = False
+        self.message.content = ''
+        self.message.attachments = [SimpleNamespace(content_type='image/png', size=10,
+            filename='advert.png', read=AsyncMock(return_value=b'fixture'))]
+        with patch('guardian.bot.inspect_image', return_value=ImageResult(qr=('https://scam.example',))):
+            await self.bot.inspect_message(self.message)
+        self.message.delete.assert_awaited_once()
+        self.assertEqual(self.author.timeout.await_args.args[0].total_seconds(), 86400)
+        self.assertIn('OCR / QR', self.store.recent(1)[0]['evidence'])
+
     async def test_commands_register_with_checks(self):
         install_commands(self.bot)
-        for name in ('case', 'cases', 'review'):
+        for name in ('case', 'cases', 'review', 'protection'):
             command = self.bot.tree.get_command(name)
             self.assertTrue(command.checks)
             self.assertTrue(command.default_permissions.moderate_members)

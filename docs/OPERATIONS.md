@@ -23,4 +23,13 @@
 - 명령 없음: applications.commands 초대 범위, 서버 ID, 시작 시 sync 오류를 확인한다.
 - 서비스 반복 재시작: `sudo journalctl -u discord-guardian -n 100`으로 설정·파일 권한·Python 오류를 확인한다.
 - DB 쓰기 실패: data 디렉터리를 전용 계정이 소유하는지 확인한다. 서비스 샌드박스는 data 이외 쓰기를 제한한다.
-- 새 이미지 미탐지: 이 버전은 이미지 의미를 분석하지 않는다. 해시 등록 또는 후속 OCR/분류 기능이 필요하다.
+- 새 이미지 미탐지: `/protection`에서 OCR 설치 언어와 피드 갱신 상태를 확인한다. `tesseract-ocr-kor` 설치 후 재시작한다. 흐린 글씨·미등록 사이트·단축 URL·이미지 의미만 있는 광고는 여전히 놓칠 수 있다.
+
+## 외부 위협 목록·사진 검사 확인
+
+1. 서버에서 `sudo apt install tesseract-ocr tesseract-ocr-kor` 후 Python 의존성을 업데이트한다.
+2. `/protection`에서 두 소스의 목록 수와 갱신 시각, eng/kor 언어 활성 상태를 확인한다.
+3. 실제 사기 링크를 공유하지 말고, 수동 차단에 예약 도메인 `scam.example`을 추가한 뒤 해당 문구가 적힌 사진과 QR을 테스트 서버에서 전송한다.
+4. OCR/QR 추출 근거와 목록 출처가 `/case`에 기록되는지 확인한다.
+5. 미등록 예제 링크 + 무료 니트로 + 지갑 연결 문구는 검토 알림만 생성하고 자동 제재하지 않는지 확인한다.
+6. 목록 다운로드 실패·만료 표시를 확인하고 서버의 GitHub raw/Phishing Army HTTPS 접근을 복구한다.

@@ -14,6 +14,9 @@ from dotenv import load_dotenv
 
 from guardian.detection import Detector
 from guardian.storage import Store
+from guardian.intelligence import Intelligence
+from guardian.content import promotional_signals
+from guardian.images import inspect_image, image_status
 
 log = logging.getLogger('guardian')
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
@@ -21,6 +24,15 @@ MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
 def load_config(path):
     c = json.loads(Path(path).read_text())
+    c.setdefault('threat_feeds_enabled', True)
+    c.setdefault('image_text_enabled', True)
+    c.setdefault('ocr_language', 'eng+kor')
+    c.setdefault('promotion_review_enabled', True)
+    for name in ('threat_feeds_enabled', 'image_text_enabled', 'promotion_review_enabled'):
+        if type(c[name]) is not bool:
+            raise ValueError(f'{name}: boolean required')
+    if c['ocr_language'] not in ('eng', 'kor', 'eng+kor'):
+        raise ValueError('ocr_language: eng, kor or eng+kor required')
     for name in ('guild_id', 'log_channel_id'):
         if type(c[name]) is not int or c[name] <= 0:
             raise ValueError(f'{name}: 실제 Discord ID를 입력하세요')
@@ -57,7 +69,9 @@ class Guardian(commands.Bot):
         super().__init__(command_prefix=commands.when_mentioned, intents=intents,
                          allowed_mentions=discord.AllowedMentions.none(), max_messages=1000)
         self.config, self.store = config, store
-        self.detector = Detector(config)
+        self.intelligence = Intelligence(store.path.parent / 'threat-intelligence.json',
+                                         enabled=config.get('threat_feeds_enabled', True))
+        self.detector = Detector(config, intelligence=self.intelligence)
         self.scans = asyncio.Semaphore(4)
         self.actions = asyncio.Lock()
 
@@ -65,7 +79,23 @@ class Guardian(commands.Bot):
         guild = discord.Object(id=self.config['guild_id'])
         self.tree.copy_global_to(guild=guild)
         await self.tree.sync(guild=guild)
+        await self.intelligence.refresh()
+        self.refresh_intelligence.start()
         self.cleanup.start()
+
+    @tasks.loop(hours=4)
+    async def refresh_intelligence(self):
+        await self.intelligence.refresh()
+
+    @refresh_intelligence.before_loop
+    async def before_refresh(self):
+        await self.wait_until_ready()
+        await asyncio.sleep(4 * 60 * 60)
+
+    async def close(self):
+        self.refresh_intelligence.cancel()
+        self.cleanup.cancel()
+        await super().close()
 
     @tasks.loop(hours=24)
     async def cleanup(self):
@@ -104,6 +134,9 @@ class Guardian(commands.Bot):
             return
         log.info('Ready. guild=%s dry_run=%s timeout=%sh', guild.id,
                  self.config['dry_run'], self.config['timeout_hours'])
+        log.info('Threat intelligence: %s', self.intelligence.status())
+        log.info('Images: %s', image_status(self.config.get('image_text_enabled', True),
+                                          self.config.get('ocr_language', 'eng+kor')))
 
     async def on_member_join(self, member):
         if member.guild.id != self.config['guild_id'] or not member.bot:
@@ -148,7 +181,7 @@ class Guardian(commands.Bot):
             if any(r.id in self.config['exempt_role_ids'] for r in getattr(message.author, 'roles', [])):
                 return
         async with self.scans:
-            hashes, skipped = [], 0
+            hashes, skipped, image_text, image_warnings = [], 0, [], []
             for attachment in message.attachments[:4]:
                 if not (attachment.content_type or '').startswith('image/'):
                     continue
@@ -158,24 +191,40 @@ class Guardian(commands.Bot):
                 try:
                     data = await asyncio.wait_for(attachment.read(), timeout=8)
                     hashes.append(hashlib.sha256(data).hexdigest())
+                    if self.config.get('image_text_enabled', True):
+                        extracted = await asyncio.to_thread(inspect_image, data,
+                            self.config.get('ocr_language', 'eng+kor'))
+                        image_text.extend([extracted.text, *extracted.qr])
+                        if extracted.warning:
+                            image_warnings.append(extracted.warning)
+                            log.warning('Image extraction incomplete: %s', extracted.warning)
                 except (discord.HTTPException, asyncio.TimeoutError):
                     skipped += 1
             text = message.content + '\n' + '\n'.join(
                 json.dumps(e.to_dict(), ensure_ascii=False) for e in message.embeds)
+            text += '\n' + '\n'.join(image_text)
             # Serialize decisions/actions to avoid duplicate 24-hour extensions.
             async with self.actions:
                 reasons = self.detector.inspect(message.guild.id, message.author.id,
                     message.id, text, hashes,
                     len(message.mentions) + len(message.role_mentions) + (8 if message.mention_everyone else 0))
-                if not reasons:
+                review_signals = promotional_signals(text) if self.config.get('promotion_review_enabled', True) else []
+                review_only = not reasons and bool(review_signals)
+                if not reasons and not review_signals:
                     return
+                if review_signals:
+                    reasons.append('스캠 광고 의심(문맥 검토): ' + ', '.join(review_signals))
                 evidence = (message.content + '\nImage SHA256: ' + ', '.join(hashes)
                             + f'\nUnscanned images: {skipped}'
-                            + '\nAttachment names: ' + ', '.join(a.filename for a in message.attachments))
+                            + '\nAttachment names: ' + ', '.join(a.filename for a in message.attachments)
+                            + '\nOCR / QR:\n' + '\n'.join(image_text)
+                            + '\nImage scan warnings: ' + '; '.join(image_warnings))
                 case_id = self.store.add(message.guild.id, message.author.id, message.channel.id,
                                          message.id, '; '.join(reasons), evidence)
                 result = []
-                if self.config['dry_run']:
+                if review_only:
+                    result.append('광고 문맥만으로 악성 확정 불가: 검토 알림만 전송, 삭제·제재 미실행')
+                elif self.config['dry_run']:
                     result.append('모의 모드: 삭제·제재 미실행')
                 else:
                     try:
@@ -202,6 +251,16 @@ class Guardian(commands.Bot):
 
 
 def install_commands(bot):
+    @bot.tree.command(name='protection', description='실제 위협 목록 갱신 상태와 이미지 검사 상태')
+    @app_commands.guild_only()
+    @app_commands.default_permissions(moderate_members=True)
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def protection(interaction: discord.Interaction):
+        status = bot.intelligence.status() + '\n' + image_status(
+            bot.config.get('image_text_enabled', True), bot.config.get('ocr_language', 'eng+kor'))
+        status += f"\n모의 모드: {bot.config['dry_run']} / 타임아웃: {bot.config['timeout_hours']}시간"
+        await interaction.response.send_message(status[:1900], ephemeral=True)
+
     @bot.tree.command(name='cases', description='최근 검토 사건 10개')
     @app_commands.guild_only()
     @app_commands.default_permissions(moderate_members=True)
